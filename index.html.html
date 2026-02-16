@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Hand Controlled Particles</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #video-container {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 160px;
+            height: 120px;
+            z-index: 2;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            overflow: hidden;
+            transform: scaleX(-1);
+        }
+
+        #webcam {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #ui {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            text-align: right;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        p {
+            font-size: 0.8rem;
+            color: #aaa;
+            margin: 5px 0;
+        }
+
+        .instruction {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 5px 10px;
+            border-radius: 4px;
+            margin-top: 5px;
+            display: inline-block;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            z-index: 20;
+            text-align: center;
+        }
+
+        #mode-indicator {
+            font-size: 1rem;
+            color: lime;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="video-container">
+        <video id="webcam" playsinline></video>
+    </div>
+
+    <div id="ui">
+        <h1>Particle Morph</h1>
+        <p>Current Shape: <span id="shape-name" style="color: cyan;">Sphere</span></p>
+        <p id="mode-indicator"></p>
+        <div class="instruction">👋 Open Hand: Expand + Move</div><br>
+        <div class="instruction">👊 Closed Fist: Attract</div><br>
+        <div class="instruction">✌️ Victory Sign: Change Shape</div>
+    </div>
+
+    <div id="loading">Initializing AI & Graphics...<br><span style="font-size: 14px;">Please allow camera access</span></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const PARTICLE_COUNT = 15000;
+        const CAM_Z = 400;
+
+        // State
+        let currentShapeIndex = 0;
+        let isVictoryGestureActive = false;
+        let lastGestureTime = 0;
+
+        // Interaction State
+        const handPosition = new THREE.Vector3(0, 0, 0);
+        const particleOffset = new THREE.Vector3(0, 0, 0);
+        let handOpenFactor = 1.0; // 0 = closed, 1 = open
+        let hueShift = 0;
+        let currentMode = '';
+
+        // --- THREE.JS SETUP ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.002);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.z = CAM_Z;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // --- PARTICLE SYSTEM ---
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const targets = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+        const sizes = new Float32Array(PARTICLE_COUNT);
+
+        const colorObj = new THREE.Color();
+
+        // Initialize particles
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            positions[i * 3] = (Math.random() - 0.5) * 800;
+            positions[i * 3 + 1] = (Math.random() - 0.5) * 800;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 800;
+            sizes[i] = Math.random() * 2;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+        const material = new THREE.PointsMaterial({
+            size: 2.5,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            transparent: true,
+            opacity: 0.8
+        });
+
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // --- SHAPE GENERATORS ---
+        const shapes = [
+            { name: "Sphere", func: getSpherePoint },
+            { name: "Heart", func: getHeartPoint },
+            { name: "Flower", func: getFlowerPoint },
+            { name: "Saturn", func: getSaturnPoint },
+            { name: "Spiral", func: getSpiralPoint }
+        ];
+
+        function getSpherePoint(i) {
+            const r = 100 + Math.random() * 20;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos((Math.random() * 2) - 1);
+            return {
+                x: r * Math.sin(phi) * Math.cos(theta),
+                y: r * Math.sin(phi) * Math.sin(theta),
+                z: r * Math.cos(phi)
+            };
+        }
+
+        function getHeartPoint(i) {
+            const range = Math.PI * 2;
+            const t = Math.random() * range;
+            const scale = 8;
+            const z = (Math.random() - 0.5) * 50;
+            let x = 16 * Math.pow(Math.sin(t), 3);
+            let y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+            return { x: x * scale, y: y * scale, z: z };
+        }
+
+        function getFlowerPoint(i) {
+            const k = 4;
+            const theta = Math.random() * Math.PI * 2;
+            const rBase = Math.cos(k * theta);
+            const radius = 150 * Math.abs(rBase) + 20;
+            return {
+                x: radius * Math.cos(theta),
+                y: radius * Math.sin(theta),
+                z: (Math.random() - 0.5) * 50
+            };
+        }
+
+        function getSaturnPoint(i) {
+            const isRing = Math.random() > 0.6;
+            if (isRing) {
+                const innerR = 140;
+                const outerR = 220;
+                const r = innerR + Math.random() * (outerR - innerR);
+                const theta = Math.random() * Math.PI * 2;
+                return {
+                    x: r * Math.cos(theta),
+                    y: (Math.random() - 0.5) * 5,
+                    z: r * Math.sin(theta)
+                };
+            } else {
+                const r = 70;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos((Math.random() * 2) - 1);
+                return {
+                    x: r * Math.sin(phi) * Math.cos(theta),
+                    y: r * Math.sin(phi) * Math.sin(theta),
+                    z: r * Math.cos(phi)
+                };
+            }
+        }
+
+        function getSpiralPoint(i) {
+            const t = i * 0.05;
+            const r = i * 0.02;
+            return {
+                x: r * Math.cos(t),
+                y: (i * 0.05) - 200,
+                z: r * Math.sin(t)
+            };
+        }
+
+        function setTargetShape(shapeIndex) {
+            const shapeFunc = shapes[shapeIndex].func;
+            document.getElementById('shape-name').innerText = shapes[shapeIndex].name;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const p = shapeFunc(i);
+                targets[i * 3] = p.x;
+                targets[i * 3 + 1] = p.y;
+                targets[i * 3 + 2] = p.z;
+            }
+        }
+
+        setTargetShape(0);
+
+        // --- MEDIAPIPE HANDS SETUP ---
+        const videoElement = document.getElementById('webcam');
+
+        function onResults(results) {
+            document.getElementById('loading').style.display = 'none';
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // Calculate Hand Position (Centroid)
+                let xAvg = 0, yAvg = 0;
+                landmarks.forEach(lm => { xAvg += lm.x; yAvg += lm.y; });
+                xAvg /= landmarks.length;
+                yAvg /= landmarks.length;
+
+                // Map to world space - DIRECT CONTROL
+                // Hand position directly controls particle offset
+                handPosition.x = (0.5 - xAvg) * 700;
+                handPosition.y = (0.5 - yAvg) * 600;
+                handPosition.z = 0;
+
+                // Gesture Detection
+                const wrist = landmarks[0];
+                const indexTip = landmarks[8];
+                const middleTip = landmarks[12];
+                const ringTip = landmarks[16];
+                const tips = [landmarks[8], landmarks[12], landmarks[16], landmarks[20]];
+                
+                let avgDist = 0;
+                tips.forEach(tip => {
+                    const d = Math.sqrt(Math.pow(tip.x - wrist.x, 2) + Math.pow(tip.y - wrist.y, 2));
+                    avgDist += d;
+                });
+                avgDist /= 4;
+
+                handOpenFactor = THREE.MathUtils.mapLinear(avgDist, 0.2, 0.5, 0.0, 1.0);
+                handOpenFactor = THREE.MathUtils.clamp(handOpenFactor, 0.0, 1.0);
+
+                // Victory Sign Detection
+                const isIndexUp = indexTip.y < landmarks[6].y;
+                const isMiddleUp = middleTip.y < landmarks[10].y;
+                const isRingDown = ringTip.y > landmarks[14].y;
+                const isLittleDown = landmarks[20].y > landmarks[18].y;
+
+                if (isIndexUp && isMiddleUp && isRingDown && isLittleDown) {
+                    const now = Date.now();
+                    if (!isVictoryGestureActive && now - lastGestureTime > 1000) {
+                        currentShapeIndex = (currentShapeIndex + 1) % shapes.length;
+                        setTargetShape(currentShapeIndex);
+                        lastGestureTime = now;
+                    }
+                    isVictoryGestureActive = true;
+                    currentMode = '✌️ Shape Change';
+                } else {
+                    isVictoryGestureActive = false;
+                    
+                    // Open Hand: Move + Expand
+                    if (handOpenFactor > 0.6) {
+                        currentMode = '👋 Move & Expand';
+                        // Direct hand position to particle offset
+                        particleOffset.lerp(handPosition, 0.15);
+                    }
+                    // Closed Fist: Attract
+                    else if (handOpenFactor < 0.3) {
+                        currentMode = '👊 Attract Mode';
+                        particleOffset.lerp(handPosition, 0.15);
+                    }
+                    // Neutral
+                    else {
+                        currentMode = '';
+                        particleOffset.lerp(new THREE.Vector3(0, 0, 0), 0.05);
+                    }
+                }
+
+                hueShift = xAvg;
+                document.getElementById('mode-indicator').textContent = currentMode;
+
+            } else {
+                // No hand detected
+                handOpenFactor = THREE.MathUtils.lerp(handOpenFactor, 1.0, 0.05);
+                particleOffset.lerp(new THREE.Vector3(0, 0, 0), 0.03);
+                currentMode = '';
+                document.getElementById('mode-indicator').textContent = '';
+            }
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480
+        });
+
+        cameraUtils.start();
+
+        // --- ANIMATION LOOP ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            const positionsAttr = geometry.attributes.position;
+            const colorsAttr = geometry.attributes.color;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const px = positions[i * 3];
+                const py = positions[i * 3 + 1];
+                const pz = positions[i * 3 + 2];
+
+                // Apply offset to targets for movement
+                const tx = targets[i * 3] + particleOffset.x;
+                const ty = targets[i * 3 + 1] + particleOffset.y;
+                const tz = targets[i * 3 + 2] + particleOffset.z;
+
+                const morphSpeed = 0.03 + (Math.random() * 0.01);
+
+                let vx = (tx - px) * morphSpeed;
+                let vy = (ty - py) * morphSpeed;
+                let vz = (tz - pz) * morphSpeed;
+
+                // Expansion effect for open hand
+                const expandMult = handOpenFactor;
+
+                // Add organic noise
+                vx += Math.sin(time * 2 + py * 0.01) * 0.2;
+                vy += Math.cos(time * 2 + px * 0.01) * 0.2;
+
+                // Attraction effect for closed fist
+                if (handOpenFactor < 0.3) {
+                    const dx = px - handPosition.x;
+                    const dy = py - handPosition.y;
+                    const dz = pz - handPosition.z;
+                    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+                    if (dist < 400) {
+                        const attractionStrength = 0.08 * (1 - handOpenFactor);
+                        vx -= dx * attractionStrength;
+                        vy -= dy * attractionStrength;
+                        vz -= dz * attractionStrength;
+                    }
+                }
+
+                // Expansion for open hand
+                if (handOpenFactor > 0.6) {
+                    vx *= (1 + (handOpenFactor - 0.6) * 0.3);
+                    vy *= (1 + (handOpenFactor - 0.6) * 0.3);
+                    vz *= (1 + (handOpenFactor - 0.6) * 0.3);
+                }
+
+                positions[i * 3] += vx;
+                positions[i * 3 + 1] += vy;
+                positions[i * 3 + 2] += vz;
+
+                // Color Cycling
+                const h = (i / PARTICLE_COUNT * 0.2) + hueShift + (time * 0.05);
+                const s = 0.8;
+                const l = 0.5 + (handOpenFactor * 0.1);
+
+                colorObj.setHSL(h % 1, s, l);
+
+                colors[i * 3] = colorObj.r;
+                colors[i * 3 + 1] = colorObj.g;
+                colors[i * 3 + 2] = colorObj.b;
+            }
+
+            positionsAttr.needsUpdate = true;
+            colorsAttr.needsUpdate = true;
+
+            particles.rotation.y = time * 0.1;
+            particles.rotation.z = time * 0.05;
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+
+</body>
+</html>
